@@ -119,3 +119,96 @@ Measure against the targets: client under about 3,000 LOC, no class string repea
 Estimated effort for one developer (rough): Steps 1 to 3 about 2 to 3 days, Steps 4 to 6 about 5 to 6 days, Step 7 about 2 days, Step 8 about 6 to 8 days, Step 9 about 2 to 3 days.
 
 Start with Step 1 and Step 2 now. Reply with the backend error-envelope fields you want, or say “go” and I will take Step 1 and specify each service and middleware change in order, without code unless you request it.
+
+
+
+
+
+
+
+Agreed. Multi-tenancy is deferred. Below is one consolidated, ordered roadmap for a production-grade single-tenant product. It merges the review findings, the error-handling work and the UI rewrite, so there is a single sequence to follow.
+
+DEFINITION OF “PRODUCTION-GRADE” (release gate, all must hold)
+
+Security: no unauthenticated takeover path, no client-controlled privilege, no default or fallback secrets, rate-limited auth endpoints.
+Correctness: authorization behaves identically for every role; wrong or missing data returns the right HTTP status and a stable error code.
+Reliability: validated config at boot, health and readiness probes, graceful shutdown, backups, repeatable deploy.
+Observability: structured logs with request IDs; every UI error shows a traceable ID.
+Quality: automated tests on RBAC and the ticket lifecycle, CI blocking merges, lint and format enforced.
+UX: one design system, loading, empty and error states on every data region, keyboard-accessible.
+
+PHASE 0. SAFETY NET (1 to 2 days)
+
+Branch strategy, ESLint and Prettier on the backend (client already has ESLint), EditorConfig to fix the mixed CRLF and LF line endings.
+Test harness (Vitest plus Supertest, disposable Mongo).
+Write characterization tests for current behaviour before changing anything: role-by-endpoint permission matrix, login, refresh rotation, ticket create, comment visibility (internal notes hidden from customers).
+CI pipeline: install, lint, test, build on every push.
+Exit: CI is green on current behaviour, so later refactors have a net.
+
+PHASE 1. SECURITY BLOCKERS (3 to 4 days)
+
+Registration: ignore client-supplied role and department; public sign-up creates customers only.
+Forgot-password: identical response for known and unknown emails; never return the token or URL; deliver by email only.
+JWT secrets: no fallbacks; the process refuses to start without them. Align token lifetimes with the .env example you ship.
+Seeder: admin credentials from environment, no password logging, force change on first login.
+Mass assignment: explicit field whitelists on ticket create and customer update, per role.
+Escape user input before it reaches a regex in customer search.
+Hardening: helmet, CORS allowlist from config, rate limits on login, register, forgot, reset and refresh, password policy beyond 6 characters, hash stored refresh tokens.
+Input validation layer (zod schemas as route middleware), replacing ad-hoc checks.
+Exit: the Phase 0 tests plus new negative tests prove each of the above (for example registering with role admin yields a customer).
+
+PHASE 2. BACKEND CORRECTNESS AND STRUCTURE (5 to 7 days)
+
+Error contract: typed errors with status and code, one envelope (code, message, fieldErrors, requestId), correct 401/403/404/409/422/500, generic message for unknown faults.
+Authorization fixes: super_admin must be handled in the ticket filter and metrics; assignTicket must verify the target is an active employee; align backend and client permission maps from one source.
+Structure: asyncHandler wrapper to remove repeated try/catch, move direct Mongoose use out of user.controller into a service, rename modals to models, delete the dead department.js route file, remove nodemon from runtime dependencies, fix package.json main, remove the DNS override from db.js.
+Data integrity: indexes for tickets and customers on real query shapes, soft delete for customers with defined behaviour for their tickets and user account, transactions for multi-document writes (customer create plus user link), customer email uniqueness policy.
+Ticket domain: human-readable ticket numbers, a status state machine with allowed transitions, reopen rules, immutable audit trail of status, assignee and priority changes.
+Exit: error and authorization tests pass; no controller touches a model directly.
+
+PHASE 3. OPERABILITY (3 to 4 days, can overlap Phase 2)
+
+Config module that validates all environment variables at boot with clear failure messages.
+Structured logging (pino) with request ID, user ID and route; remove the 21 console.log calls.
+/healthz and /readyz (DB reachable), graceful shutdown on SIGTERM.
+Dockerfile and compose for api, client and Mongo; separate dev, staging and prod configs.
+Email sending moved to a queue or at minimum a retry wrapper; failures logged, never silently swallowed.
+Database migrations via a migration tool instead of one-off scripts; backup and restore procedure written and tested once.
+Exit: a clean machine goes from clone to running stack with one command; a killed process shuts down cleanly.
+
+PHASE 4. FRONTEND FOUNDATION (5 to 6 days)
+Follow the earlier UI plan, Steps 2 to 6, in this order: structure and TypeScript, design tokens, primitives, the error-handling architecture (normalized AppError, scope-based presentation, ConfirmDialog replacing alert and confirm, route error boundaries, a real 404, session-expiry handling by router navigation), then the typed HTTP client with TanStack Query hooks and URL-synced filters.
+Exit: the catalogue page shows every primitive in every state; you can trigger each error kind and see the correct presentation.
+
+PHASE 5. SHELL AND PAGE REBUILD (8 to 10 days)
+Earlier Steps 7 and 8: single AppShell with permission-driven navigation, one route tree, then pages in order: auth, tickets list, ticket detail, customers, employees and departments, one dashboard. Remove AG Grid.
+Exit: client under about 3,000 lines, one layout, no page over about 150 lines, no page holding fetch, loading or pagination state.
+
+PHASE 6. PRODUCT FEATURES THAT RAISE THE GRADE (5 to 8 days; choose scope)
+Recommended minimum: employee queue with claim action (decision below), notification emails on assignment, comment and status change, ticket search, attachments with size and type limits, and basic reporting (open, resolved, per-agent load, average first response). Defer SLA timers, knowledge base and CSAT until after release.
+
+PHASE 7. QUALITY GATES (4 to 5 days)
+
+Tests: RBAC matrix complete, ticket lifecycle, auth flows, error-presentation matrix on the frontend; end-to-end flows for login, create ticket, assign, comment, expired session, offline.
+Accessibility pass and a bundle-size check after removing AG Grid.
+Security checklist (OWASP ASVS level 1 items), dependency audit in CI.
+Documentation: README with setup, architecture overview, OpenAPI description of the API, a short runbook (deploy, rollback, backup restore).
+Exit: coverage on auth, RBAC and ticket services meaningfully high and enforced in CI.
+
+PHASE 8. RELEASE READINESS (1 to 2 days)
+Staging deployment, smoke test script, rollback procedure, changelog, version tag.
+
+Total (rough estimate, one developer): about 5 to 7 weeks.
+
+DEPENDENCY LOGIC
+Tests precede refactors (Phase 0), security precedes everything user-facing (Phase 1), the error contract in Phase 2 must land before the frontend error architecture in Phase 4, and features come last so they are built on stable foundations. Phase 3 can run beside Phase 2; Phase 4 can start as soon as the error envelope exists.
+
+NO-REGRET CHOICES FOR LATER MULTI-TENANCY (cost almost nothing now)
+
+Keep all data access inside services, with no model calls in controllers.
+Avoid new globally unique database constraints beyond those that exist.
+Take base URLs, brand name, email sender and links from configuration, not hardcoded strings.
+Keep colors and branding in design tokens.
+Keep role names and permissions in one shared definition.
+
+Start Phase 0 and Phase 1 now; neither depends on any open decision. One decision is needed before Phase 2 ticket work: should employees see and claim unassigned tickets in their department (queue model), or only tickets already assigned to them (current behaviour)?
